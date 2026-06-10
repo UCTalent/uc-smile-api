@@ -8,9 +8,10 @@
     "start": "node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
-    "db:push": "drizzle-kit push",
+    "db:setup": "tsx src/scripts/setup-db.ts",
+    "db:push": "tsx src/scripts/setup-db.ts && drizzle-kit push",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "drizzle-kit migrate"
+    "db:migrate": "tsx src/scripts/setup-db.ts && drizzle-kit migrate"
   },
   "dependencies": {
     "cors": "^2.8.5",
