@@ -4,7 +4,6 @@ import cors from "cors";
 import express from "express";
 import { adminAuthMiddleware } from "./middleware/admin-auth";
 import { adminRouter } from "./routes/admin/index";
-import { reindexRouter } from "./routes/admin/reindex";
 import { chatRouter } from "./routes/chat";
 
 const app = express();
@@ -15,8 +14,7 @@ app.use(express.json());
 
 app.get("/health", (_req, res) => res.json({ status: "ok" }));
 app.use("/chat", chatRouter);
-app.use("/admin/reindex", reindexRouter);                   // no auth required
-app.use("/admin", adminAuthMiddleware, adminRouter);         // auth required
+app.use("/admin", adminAuthMiddleware, adminRouter);
 
 app.listen(PORT, () => {
   console.log(`[uc-smile-api] Running on port ${PORT}`);
