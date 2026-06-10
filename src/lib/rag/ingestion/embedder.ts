@@ -5,7 +5,7 @@ type EmbedContentResponse = {
 };
 
 const EMBED_URL = (key: string) =>
-  `https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key=${key}`;
+  `https://generativelanguage.googleapis.com/v1beta/models/embedding-001:embedContent?key=${key}`;
 
 const BATCH_SIZE = 20;
 const BATCH_DELAY_MS = 200;
@@ -26,7 +26,7 @@ async function embedTextWithRetry(text: string, key: string, attempt = 0): Promi
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: "models/text-embedding-004",
+        model: "models/embedding-001",
         content: { parts: [{ text }] },
       }),
       signal: controller.signal,
@@ -51,7 +51,7 @@ async function embedTextWithRetry(text: string, key: string, attempt = 0): Promi
 }
 
 /**
- * Embeds a single text string using Gemini text-embedding-004.
+ * Embeds a single text string using Gemini embedding-001.
  *
  * @param text - The text to embed
  * @returns A 768-dimensional embedding vector
