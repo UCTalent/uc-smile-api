@@ -106,11 +106,15 @@ export async function runIngestionPipeline(jobId: string): Promise<void> {
       if (chunks.length > 0) {
         for (let i = 0; i < chunks.length; i++) {
           const chunk = chunks[i];
-          const vectorStr = `[${embeddings[i].join(",")}]`;
+          // Use sql.raw to inline the vector literal directly (not parameterized).
+          // Parameterized $N::vector fails because pg sends unknown OID — pgvector
+          // cannot infer the cast target. Inline literal is safe here since all
+          // values are floats produced by the embedder.
+          const vectorLiteral = `'[${embeddings[i].join(",")}]'`;
           await tx.insert(ragChunks).values({
             faqId: chunk.faqId,
             content: chunk.content,
-            embedding: sql`${vectorStr}::vector`,
+            embedding: sql`${sql.raw(vectorLiteral)}::vector`,
             metadata: chunk.metadata,
           });
         }
