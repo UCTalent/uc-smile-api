@@ -28,6 +28,10 @@ async function embedTextWithRetry(text: string, key: string, attempt = 0): Promi
       body: JSON.stringify({
         model: "models/gemini-embedding-001",
         content: { parts: [{ text }] },
+        // gemini-embedding-001 defaults to 3072 dims; truncate to 768 to match
+        // the pgvector column definition and reduce storage/search latency.
+        // MRL training means truncated vectors retain quality.
+        outputDimensionality: 768,
       }),
       signal: controller.signal,
     });

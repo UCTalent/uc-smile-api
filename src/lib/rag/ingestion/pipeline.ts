@@ -143,8 +143,11 @@ export async function runIngestionPipeline(jobId: string): Promise<void> {
 
     log(`Job ${jobId} completed successfully`);
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    // Log root cause first (err.cause = original pg error), then Drizzle wrapper
+    const cause = err instanceof Error && err.cause instanceof Error ? err.cause : undefined;
+    const message = cause ? cause.message : err instanceof Error ? err.message : String(err);
     log(`Job ${jobId} failed: ${message}`);
+    if (cause) log(`Drizzle context: ${(err as Error).message.split("\n")[0]}`);
 
     await db
       .update(reindexJobs)
