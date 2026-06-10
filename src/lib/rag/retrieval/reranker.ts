@@ -50,8 +50,8 @@ export function rerankChunks(
     return { ...chunk, final_score: finalScore };
   });
 
-  // Sort by final_score descending and return top 4
+  // Sort by final_score descending and return top 6
   return scored
     .sort((a, b) => (b.final_score ?? 0) - (a.final_score ?? 0))
-    .slice(0, 4);
+    .slice(0, 6);
 }

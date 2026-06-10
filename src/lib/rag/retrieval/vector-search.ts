@@ -40,7 +40,7 @@ export async function searchSimilarChunks(
         indexed_at,
         1 - (embedding <=> ${sql.raw(`'${vectorStr}'`)}::vector) AS similarity
       FROM rag_chunks
-      WHERE 1 - (embedding <=> ${sql.raw(`'${vectorStr}'`)}::vector) > 0.65
+      WHERE 1 - (embedding <=> ${sql.raw(`'${vectorStr}'`)}::vector) > 0.5
       ORDER BY embedding <=> ${sql.raw(`'${vectorStr}'`)}::vector
       LIMIT ${sql.raw(String(topK))}
     `,
