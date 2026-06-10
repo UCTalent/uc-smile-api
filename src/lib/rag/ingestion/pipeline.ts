@@ -1,5 +1,5 @@
 import { eq, inArray, sql } from "drizzle-orm";
-import { db } from "../../db";
+import { db, pool } from "../../db";
 import { faqItems, ragChunks, reindexJobs } from "../../db/schema";
 import { chunkFaqItems } from "./chunker";
 import { embedBatch } from "./embedder";
@@ -95,31 +95,38 @@ export async function runIngestionPipeline(jobId: string): Promise<void> {
     log("Replacing chunks in database...");
     const faqIds = [...new Set(upsertedItems.map((item) => item.id))];
 
-    await db.transaction(async (tx) => {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+
       // Delete existing chunks for all affected FAQ items
       if (faqIds.length > 0) {
-        await tx.delete(ragChunks).where(inArray(ragChunks.faqId, faqIds));
+        await client.query(
+          `DELETE FROM rag_chunks WHERE faq_id = ANY($1::uuid[])`,
+          [faqIds],
+        );
       }
 
-      // Insert new chunks with embeddings
-      // pgvector requires the embedding cast via SQL literal
-      if (chunks.length > 0) {
-        for (let i = 0; i < chunks.length; i++) {
-          const chunk = chunks[i];
-          // Use sql.raw to inline the vector literal directly (not parameterized).
-          // Parameterized $N::vector fails because pg sends unknown OID — pgvector
-          // cannot infer the cast target. Inline literal is safe here since all
-          // values are floats produced by the embedder.
-          const vectorLiteral = `'[${embeddings[i].join(",")}]'`;
-          await tx.insert(ragChunks).values({
-            faqId: chunk.faqId,
-            content: chunk.content,
-            embedding: sql`${sql.raw(vectorLiteral)}::vector`,
-            metadata: chunk.metadata,
-          });
-        }
+      // Insert new chunks with embeddings using raw pool.query so the vector
+      // string is passed as a plain text parameter with an explicit ::vector cast
+      // in the SQL itself — this guarantees pgvector receives the correct type.
+      for (let i = 0; i < chunks.length; i++) {
+        const chunk = chunks[i];
+        const vectorStr = `[${embeddings[i].join(",")}]`;
+        await client.query(
+          `INSERT INTO rag_chunks (faq_id, content, embedding, metadata)
+           VALUES ($1, $2, $3::vector, $4)`,
+          [chunk.faqId, chunk.content, vectorStr, JSON.stringify(chunk.metadata)],
+        );
       }
-    });
+
+      await client.query("COMMIT");
+    } catch (txErr) {
+      await client.query("ROLLBACK");
+      throw txErr;
+    } finally {
+      client.release();
+    }
 
     log(`Inserted ${chunks.length} chunks`);
 
