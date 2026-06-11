@@ -1,15 +1,19 @@
 import type { RagChunkWithScore } from "../../db/types";
 
+// Only truly meaningless function words — do NOT add intent-bearing terms like
+// "không" (negation), "nếu" (conditional), "vì"/"bởi" (causal), "khi" (temporal),
+// or question words like "bao", "nhiêu", "sao", "đâu" which signal user intent.
 const STOPWORDS = new Set([
   // English
   "at", "the", "is", "are", "was", "were", "a", "an", "of", "to", "in", "it",
   "and", "or", "but", "for", "on", "with", "as", "by", "from", "that", "this",
   "be", "have", "has", "had", "do", "does", "did", "will", "would", "could",
   "should", "may", "might", "can",
-  // Vietnamese
-  "và", "là", "của", "với", "cho", "có", "không", "được", "này", "đó",
-  "một", "những", "các", "tôi", "bạn", "họ", "chúng", "ta", "mình",
-  "thì", "mà", "nhưng", "hay", "hoặc", "nếu", "vì", "bởi", "khi",
+  // Vietnamese — conjunctions, articles, pronouns with no discriminative value
+  "và", "là", "của", "với", "cho", "có", "được", "này", "đó",
+  "một", "những", "các",
+  "tôi", "bạn", "họ", "chúng", "ta", "mình",
+  "thì", "mà", "nhưng", "hay", "hoặc",
 ]);
 
 /**
@@ -42,7 +46,10 @@ export function rerankChunks(
     if (queryTerms.length > 0) {
       const contentLower = chunk.content.toLowerCase();
       const matchCount = queryTerms.filter((term) => contentLower.includes(term)).length;
-      keywordRatio = matchCount / queryTerms.length;
+      // Divide by sqrt(length) instead of length to reduce long-query bias.
+      // e.g. "implant" (1 term, 1 match) → 1.0; "chi phí implant bao nhiêu"
+      // (4 terms, 1 match) → 0.5 — more equitable than 1/4 = 0.25.
+      keywordRatio = Math.min(matchCount / Math.sqrt(queryTerms.length), 1.0);
     }
 
     const finalScore = chunk.similarity * 0.7 + keywordRatio * 0.3;
@@ -50,8 +57,30 @@ export function rerankChunks(
     return { ...chunk, final_score: finalScore };
   });
 
-  // Sort by final_score descending and return top 6
-  return scored
+  // Deduplicate by faqId: qa_pair and answer_only from the same FAQ contain
+  // the same answer text, so sending both wastes a context slot.
+  // Always prefer qa_pair (it has question + answer) over answer_only.
+  // Among chunks of the same type, prefer higher final_score.
+  const byFaqId = new Map<string, RagChunkWithScore>();
+  for (const chunk of scored) {
+    const existing = byFaqId.get(chunk.faqId);
+    if (!existing) {
+      byFaqId.set(chunk.faqId, chunk);
+    } else {
+      // Prefer qa_pair regardless of score; otherwise keep higher score
+      const incomingIsQaPair = chunk.metadata?.chunkType === "qa_pair";
+      const existingIsQaPair = existing.metadata?.chunkType === "qa_pair";
+      if (incomingIsQaPair && !existingIsQaPair) {
+        byFaqId.set(chunk.faqId, chunk);
+      } else if (!incomingIsQaPair && existingIsQaPair) {
+        // keep existing
+      } else if ((chunk.final_score ?? 0) > (existing.final_score ?? 0)) {
+        byFaqId.set(chunk.faqId, chunk);
+      }
+    }
+  }
+
+  return [...byFaqId.values()]
     .sort((a, b) => (b.final_score ?? 0) - (a.final_score ?? 0))
     .slice(0, 6);
 }

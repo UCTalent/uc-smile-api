@@ -67,7 +67,10 @@ chatRouter.post("/", rateLimiterMiddleware, async (req: Request, res: Response):
 
   try {
     for await (const token of ragQuery(message, history)) {
-      res.write(`data: ${token}\n\n`);
+      // Encode newlines so multi-line tokens don't break SSE framing.
+      // The client decodes \n back to real newlines.
+      const encoded = token.replace(/\n/g, "\\n");
+      res.write(`data: ${encoded}\n\n`);
     }
     res.write("data: [DONE]\n\n");
     res.end();
