@@ -18,12 +18,13 @@ export class RagChunkEntity {
   faqId!: string;
 
   @ManyToOne(() => FaqItemEntity, (faq) => faq.chunks, { onDelete: "CASCADE" })
-  @JoinColumn({ name: "faq_id" })
+  @JoinColumn({ name: "faq_id", foreignKeyConstraintName: "rag_chunks_faq_id_faq_items_id_fk" })
   faq?: FaqItemEntity;
 
   @Column({ type: "text" })
   content!: string;
 
+  @Index("rag_chunks_embedding_idx", { synchronize: false })
   @Column({ type: "vector", length: "768", nullable: true, select: false })
   embedding!: number[] | string | null;
 

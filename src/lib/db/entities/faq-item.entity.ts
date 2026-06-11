@@ -1,8 +1,8 @@
-import { Column, CreateDateColumn, Entity, Index, OneToMany, PrimaryGeneratedColumn, UpdateDateColumn } from "typeorm";
+import { Column, CreateDateColumn, Entity, OneToMany, PrimaryGeneratedColumn, Unique, UpdateDateColumn } from "typeorm";
 import { RagChunkEntity } from "./rag-chunk.entity";
 
 @Entity({ name: "faq_items" })
-@Index("faq_items_source_row_unique", ["sourceRow"], { unique: true })
+@Unique("faq_items_source_row_unique", ["sourceRow"])
 export class FaqItemEntity {
   @PrimaryGeneratedColumn("uuid")
   id!: string;
