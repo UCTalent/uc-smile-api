@@ -1,6 +1,5 @@
-import { eq, inArray, sql } from "drizzle-orm";
-import { db, pool } from "../../db";
-import { faqItems, ragChunks, reindexJobs } from "../../db/schema";
+import { getRepositories } from "../../db";
+import type { FaqItem } from "../../db/types";
 import { chunkFaqItems } from "./chunker";
 import { embedBatch } from "./embedder";
 import { loadFaqFromSheet } from "./sheet-loader";
@@ -27,11 +26,10 @@ function log(message: string): void {
  */
 export async function runIngestionPipeline(jobId: string): Promise<void> {
   try {
+    const { dataSource, reindexJobs } = await getRepositories();
+
     // Step 1: Mark job as running
-    await db
-      .update(reindexJobs)
-      .set({ status: "running" })
-      .where(eq(reindexJobs.id, jobId));
+    await reindexJobs.update({ id: jobId }, { status: "running" });
 
     log(`Job ${jobId} started`);
 
@@ -43,26 +41,34 @@ export async function runIngestionPipeline(jobId: string): Promise<void> {
     // Step 3: Upsert faq_items
     log("Upserting FAQ items...");
     const now = new Date();
-    const upsertedItems = await db
-      .insert(faqItems)
-      .values(
-        sheetRows.map((row) => ({
-          question: row.question,
-          answer: row.answer,
-          category: row.category,
-          sourceRow: row.sourceRow,
-        })),
-      )
-      .onConflictDoUpdate({
-        target: faqItems.sourceRow,
-        set: {
-          question: faqItems.question,
-          answer: faqItems.answer,
-          category: faqItems.category,
-          updatedAt: now,
-        },
-      })
-      .returning();
+    const upsertValues: unknown[] = [];
+    const valuePlaceholders = sheetRows.map((row, index) => {
+      const base = index * 5;
+      upsertValues.push(row.question, row.answer, row.category, row.sourceRow, now);
+      return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5})`;
+    });
+
+    const upsertedItems = (await dataSource.query(
+      `
+        INSERT INTO faq_items (question, answer, category, source_row, updated_at)
+        VALUES ${valuePlaceholders.join(", ")}
+        ON CONFLICT (source_row)
+        DO UPDATE SET
+          question = EXCLUDED.question,
+          answer = EXCLUDED.answer,
+          category = EXCLUDED.category,
+          updated_at = EXCLUDED.updated_at
+        RETURNING
+          id,
+          question,
+          answer,
+          category,
+          source_row AS "sourceRow",
+          created_at AS "createdAt",
+          updated_at AS "updatedAt"
+      `,
+      upsertValues,
+    )) as FaqItem[];
 
     log(`Upserted ${upsertedItems.length} FAQ items`);
 
@@ -83,10 +89,7 @@ export async function runIngestionPipeline(jobId: string): Promise<void> {
       embeddings.push(...batchEmbeddings);
 
       // Update progress
-      await db
-        .update(reindexJobs)
-        .set({ indexedRows: Math.min(i + batchSize, contents.length) })
-        .where(eq(reindexJobs.id, jobId));
+      await reindexJobs.update({ id: jobId }, { indexedRows: Math.min(i + batchSize, contents.length) });
 
       log(`Embedded ${Math.min(i + batchSize, contents.length)}/${contents.length} chunks`);
     }
@@ -95,68 +98,76 @@ export async function runIngestionPipeline(jobId: string): Promise<void> {
     log("Replacing chunks in database...");
     const faqIds = [...new Set(upsertedItems.map((item) => item.id))];
 
-    const client = await pool.connect();
+    const queryRunner = dataSource.createQueryRunner();
+    let transactionStarted = false;
     try {
-      await client.query("BEGIN");
+      await queryRunner.connect();
+      await queryRunner.startTransaction();
+      transactionStarted = true;
 
       // Delete existing chunks for all affected FAQ items
       if (faqIds.length > 0) {
-        await client.query(
+        await queryRunner.query(
           `DELETE FROM rag_chunks WHERE faq_id = ANY($1::uuid[])`,
           [faqIds],
         );
       }
 
-      // Insert new chunks with embeddings using raw pool.query so the vector
+      // Insert new chunks with embeddings using raw SQL so the vector
       // string is passed as a plain text parameter with an explicit ::vector cast
       // in the SQL itself — this guarantees pgvector receives the correct type.
       for (let i = 0; i < chunks.length; i++) {
         const chunk = chunks[i];
         const vectorStr = `[${embeddings[i].join(",")}]`;
-        await client.query(
+        await queryRunner.query(
           `INSERT INTO rag_chunks (faq_id, content, embedding, metadata)
            VALUES ($1, $2, $3::vector, $4)`,
           [chunk.faqId, chunk.content, vectorStr, JSON.stringify(chunk.metadata)],
         );
       }
 
-      await client.query("COMMIT");
+      await queryRunner.commitTransaction();
+      transactionStarted = false;
     } catch (txErr) {
-      await client.query("ROLLBACK");
+      if (transactionStarted) {
+        await queryRunner.rollbackTransaction();
+      }
       throw txErr;
     } finally {
-      client.release();
+      await queryRunner.release();
     }
 
     log(`Inserted ${chunks.length} chunks`);
 
     // Step 7: Mark job as done
-    await db
-      .update(reindexJobs)
-      .set({
+    await reindexJobs.update(
+      { id: jobId },
+      {
         status: "done",
         totalRows: upsertedItems.length,
         indexedRows: chunks.length,
         finishedAt: new Date(),
-      })
-      .where(eq(reindexJobs.id, jobId));
+      },
+    );
 
     log(`Job ${jobId} completed successfully`);
   } catch (err) {
-    // Log root cause first (err.cause = original pg error), then Drizzle wrapper
+    // Log root cause first when the database driver wraps the original pg error.
     const cause = err instanceof Error && err.cause instanceof Error ? err.cause : undefined;
     const message = cause ? cause.message : err instanceof Error ? err.message : String(err);
     log(`Job ${jobId} failed: ${message}`);
-    if (cause) log(`Drizzle context: ${(err as Error).message.split("\n")[0]}`);
+    if (cause) log(`Database context: ${(err as Error).message.split("\n")[0]}`);
 
-    await db
-      .update(reindexJobs)
-      .set({
-        status: "failed",
-        error: message,
-        finishedAt: new Date(),
-      })
-      .where(eq(reindexJobs.id, jobId))
+    const { reindexJobs } = await getRepositories();
+    await reindexJobs
+      .update(
+        { id: jobId },
+        {
+          status: "failed",
+          error: message,
+          finishedAt: new Date(),
+        },
+      )
       .catch((updateErr: unknown) => {
         const updateMessage = updateErr instanceof Error ? updateErr.message : String(updateErr);
         log(`Failed to update job status to failed: ${updateMessage}`);

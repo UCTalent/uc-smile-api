@@ -1,9 +1,10 @@
-import type { InferSelectModel } from "drizzle-orm";
-import type { faqItems, ragChunks, reindexJobs } from "./schema";
+import type { FaqItemEntity } from "./entities/faq-item.entity";
+import type { ChunkMetadata, RagChunkEntity } from "./entities/rag-chunk.entity";
+import type { ReindexJobEntity } from "./entities/reindex-job.entity";
 
-export type FaqItem = InferSelectModel<typeof faqItems>;
-export type RagChunk = InferSelectModel<typeof ragChunks>;
-export type ReindexJob = InferSelectModel<typeof reindexJobs>;
+export type FaqItem = FaqItemEntity;
+export type RagChunk = RagChunkEntity;
+export type ReindexJob = ReindexJobEntity;
 
 export type RagChunkWithScore = RagChunk & {
   similarity: number;
@@ -13,7 +14,7 @@ export type RagChunkWithScore = RagChunk & {
 export type ChunkInput = {
   faqId: string;
   content: string;
-  metadata: NonNullable<RagChunk["metadata"]>;
+  metadata: ChunkMetadata;
 };
 
 export type Message = {

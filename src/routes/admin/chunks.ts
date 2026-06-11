@@ -1,8 +1,6 @@
-import { count, ilike } from "drizzle-orm";
 import { Router } from "express";
 import type { Request, Response } from "express";
-import { db } from "../../lib/db/index";
-import { ragChunks } from "../../lib/db/schema";
+import { getRepositories } from "../../lib/db/index";
 
 export const chunksRouter = Router();
 
@@ -23,32 +21,30 @@ chunksRouter.get("/", async (req: Request, res: Response): Promise<void> => {
     const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit ?? "20"), 10) || 20));
     const search = typeof req.query.search === "string" ? req.query.search.trim() : "";
     const offset = (page - 1) * limit;
+    const { ragChunks } = await getRepositories();
 
-    const whereClause = search ? ilike(ragChunks.content, `%${search}%`) : undefined;
+    const baseQuery = ragChunks.createQueryBuilder("chunk");
+
+    if (search) {
+      baseQuery.where("chunk.content ILIKE :search", { search: `%${search}%` });
+    }
 
     // Get total count
-    const countResult = await db
-      .select({ total: count() })
-      .from(ragChunks)
-      .where(whereClause);
-
-    const total = countResult[0]?.total ?? 0;
+    const total = await baseQuery.getCount();
     const totalPages = Math.ceil(total / limit);
 
     // Fetch page of chunks (exclude embedding field)
-    const data = await db
-      .select({
-        id: ragChunks.id,
-        faqId: ragChunks.faqId,
-        content: ragChunks.content,
-        metadata: ragChunks.metadata,
-        indexedAt: ragChunks.indexedAt,
-      })
-      .from(ragChunks)
-      .where(whereClause)
-      .orderBy(ragChunks.indexedAt)
-      .limit(limit)
-      .offset(offset);
+    const dataQuery = ragChunks.createQueryBuilder("chunk");
+
+    if (search) {
+      dataQuery.where("chunk.content ILIKE :search", { search: `%${search}%` });
+    }
+
+    const data = await dataQuery
+      .orderBy("chunk.indexedAt", "ASC")
+      .take(limit)
+      .skip(offset)
+      .getMany();
 
     res.json({ data, total, page, totalPages });
   } catch (err) {

@@ -26,8 +26,7 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-password}@postgres:5432/ucsmile_rag
-    command: >
-      sh -c "node -e \"require('child_process').execSync('npx drizzle-kit migrate', {stdio:'inherit'})\" && node dist/index.js"
+      AUTO_RUN_MIGRATIONS: "${AUTO_RUN_MIGRATIONS:-false}"
 
 volumes:
   postgres_data:

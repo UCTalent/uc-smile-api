@@ -1,12 +1,18 @@
-import { drizzle } from "drizzle-orm/node-postgres";
-import { Pool } from "pg";
-import * as schema from "./schema";
+import { AppDataSource, initializeDataSource } from "./data-source";
+import { FaqItemEntity } from "./entities/faq-item.entity";
+import { RagChunkEntity } from "./entities/rag-chunk.entity";
+import { ReindexJobEntity } from "./entities/reindex-job.entity";
 
-export const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  max: 10,
-  idleTimeoutMillis: 30_000,
-  connectionTimeoutMillis: 5_000,
-});
+export { AppDataSource, initializeDataSource };
+export { FaqItemEntity, RagChunkEntity, ReindexJobEntity };
 
-export const db = drizzle(pool, { schema });
+export async function getRepositories() {
+  const dataSource = await initializeDataSource();
+
+  return {
+    dataSource,
+    faqItems: dataSource.getRepository(FaqItemEntity),
+    ragChunks: dataSource.getRepository(RagChunkEntity),
+    reindexJobs: dataSource.getRepository(ReindexJobEntity),
+  };
+}

@@ -1,8 +1,6 @@
-import { desc, eq } from "drizzle-orm";
 import { Router } from "express";
 import type { Request, Response } from "express";
-import { db } from "../../lib/db/index";
-import { reindexJobs } from "../../lib/db/schema";
+import { getRepositories } from "../../lib/db/index";
 
 export const statusRouter = Router();
 
@@ -14,22 +12,17 @@ export const statusRouter = Router();
 statusRouter.get("/", async (req: Request, res: Response): Promise<void> => {
   try {
     const jobId = typeof req.query.jobId === "string" ? req.query.jobId : null;
+    const { reindexJobs } = await getRepositories();
 
     let job;
 
     if (jobId) {
-      const results = await db
-        .select()
-        .from(reindexJobs)
-        .where(eq(reindexJobs.id, jobId))
-        .limit(1);
-      job = results[0] ?? null;
+      job = await reindexJobs.findOneBy({ id: jobId });
     } else {
-      const results = await db
-        .select()
-        .from(reindexJobs)
-        .orderBy(desc(reindexJobs.startedAt))
-        .limit(1);
+      const results = await reindexJobs.find({
+        order: { startedAt: "DESC" },
+        take: 1,
+      });
       job = results[0] ?? null;
     }
 

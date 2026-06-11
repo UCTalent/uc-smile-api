@@ -1,5 +1,4 @@
-import { sql } from "drizzle-orm";
-import { db } from "../../db";
+import { initializeDataSource } from "../../db";
 import type { RagChunkWithScore } from "../../db/types";
 import { toVectorString } from "../ingestion/embedder";
 
@@ -7,7 +6,6 @@ type RawChunkRow = {
   id: string;
   faq_id: string;
   content: string;
-  embedding: number[] | null;
   metadata: Record<string, unknown>;
   indexed_at: Date;
   similarity: number;
@@ -28,29 +26,30 @@ export async function searchSimilarChunks(
   topK = 10,
 ): Promise<RagChunkWithScore[]> {
   const vectorStr = toVectorString(queryEmbedding);
+  const dataSource = await initializeDataSource();
 
-  const rows = await db.execute<RawChunkRow>(
-    sql`
+  const rows = (await dataSource.query(
+    `
       SELECT
         id,
         faq_id,
         content,
-        embedding,
         metadata,
         indexed_at,
-        1 - (embedding <=> ${sql.raw(`'${vectorStr}'`)}::vector) AS similarity
+        1 - (embedding <=> $1::vector) AS similarity
       FROM rag_chunks
-      WHERE 1 - (embedding <=> ${sql.raw(`'${vectorStr}'`)}::vector) > 0.65
-      ORDER BY embedding <=> ${sql.raw(`'${vectorStr}'`)}::vector
-      LIMIT ${sql.raw(String(topK))}
+      WHERE 1 - (embedding <=> $1::vector) > $2
+      ORDER BY embedding <=> $1::vector
+      LIMIT $3
     `,
-  );
+    [vectorStr, 0.65, topK],
+  )) as RawChunkRow[];
 
-  return rows.rows.map((row) => ({
+  return rows.map((row) => ({
     id: row.id,
     faqId: row.faq_id,
     content: row.content,
-    embedding: row.embedding,
+    embedding: null,
     metadata: row.metadata as RagChunkWithScore["metadata"],
     indexedAt: row.indexed_at,
     similarity: Number(row.similarity),

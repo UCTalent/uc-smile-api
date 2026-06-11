@@ -1,8 +1,6 @@
-import { desc, eq } from "drizzle-orm";
 import { Router } from "express";
 import type { Request, Response } from "express";
-import { db } from "../../lib/db/index";
-import { reindexJobs } from "../../lib/db/schema";
+import { getRepositories } from "../../lib/db/index";
 import { runIngestionPipeline } from "../../lib/rag/index";
 
 export const reindexRouter = Router();
@@ -14,26 +12,21 @@ export const reindexRouter = Router();
  */
 reindexRouter.post("/", async (_req: Request, res: Response): Promise<void> => {
   try {
-    // Check for running job
-    const runningJobs = await db
-      .select()
-      .from(reindexJobs)
-      .where(eq(reindexJobs.status, "running"))
-      .limit(1);
+    const { reindexJobs } = await getRepositories();
 
-    if (runningJobs.length > 0) {
+    // Check for running job
+    const runningJob = await reindexJobs.findOneBy({ status: "running" });
+
+    if (runningJob) {
       res.status(409).json({
         error: "A reindex job is already running",
-        jobId: runningJobs[0].id,
+        jobId: runningJob.id,
       });
       return;
     }
 
     // Create a new job record
-    const [job] = await db
-      .insert(reindexJobs)
-      .values({ status: "pending" })
-      .returning();
+    const job = await reindexJobs.save(reindexJobs.create({ status: "pending" }));
 
     // Fire-and-forget background pipeline
     runIngestionPipeline(job.id).catch(console.error);
@@ -51,11 +44,11 @@ reindexRouter.post("/", async (_req: Request, res: Response): Promise<void> => {
  */
 reindexRouter.get("/", async (_req: Request, res: Response): Promise<void> => {
   try {
-    const jobs = await db
-      .select()
-      .from(reindexJobs)
-      .orderBy(desc(reindexJobs.startedAt))
-      .limit(5);
+    const { reindexJobs } = await getRepositories();
+    const jobs = await reindexJobs.find({
+      order: { startedAt: "DESC" },
+      take: 5,
+    });
 
     res.json({ jobs });
   } catch (err) {

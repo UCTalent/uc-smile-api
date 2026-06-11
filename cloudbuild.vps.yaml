@@ -1,0 +1,280 @@
+steps:
+  # ---------------------------------------------
+  # 1. Pull cache + render .env in parallel
+  # ---------------------------------------------
+  - name: gcr.io/cloud-builders/docker
+    id: Pull-cache
+    waitFor: ['-']
+    entrypoint: sh
+    args:
+      - -c
+      - >-
+        docker pull $_AR_HOSTNAME/$_AR_PROJECT_ID/$_AR_REPOSITORY/$REPO_NAME/$_SERVICE_NAME:latest || true
+
+  - name: gcr.io/cloud-builders/gcloud
+    id: Render-env
+    waitFor: ['-']
+    env:
+      - _SERVICE_NAME=${_SERVICE_NAME}
+      - _NODE_ENV=${_NODE_ENV}
+      - _PORT=${_PORT}
+      - _ALLOWED_ORIGIN=${_ALLOWED_ORIGIN}
+      - _GOOGLE_SHEET_ID=${_GOOGLE_SHEET_ID}
+      - _GOOGLE_SHEET_GID=${_GOOGLE_SHEET_GID}
+      - _AUTO_RUN_MIGRATIONS=${_AUTO_RUN_MIGRATIONS}
+      - _SECRET_JSON_NAME=${_SECRET_JSON_NAME}
+    script: |
+      set -e
+
+      echo "[env] Rendering .env file..."
+
+      cat > /workspace/.env <<EOF
+      # ===== APPLICATION =====
+      NODE_ENV=$_NODE_ENV
+      PORT=$_PORT
+      ALLOWED_ORIGIN=$_ALLOWED_ORIGIN
+      AUTO_RUN_MIGRATIONS=$_AUTO_RUN_MIGRATIONS
+
+      # ===== GOOGLE SHEET =====
+      GOOGLE_SHEET_ID=$_GOOGLE_SHEET_ID
+      GOOGLE_SHEET_GID=$_GOOGLE_SHEET_GID
+      EOF
+
+      echo "[env] Injecting secrets from Secret Manager JSON..."
+      SECRET_JSON=$(gcloud secrets versions access latest --secret="$_SECRET_JSON_NAME")
+      export SECRET_JSON
+
+      python3 - <<'PY' >> /workspace/.env
+      import json
+      import os
+
+      data = json.loads(os.environ["SECRET_JSON"])
+      for key, value in data.items():
+          if isinstance(value, (dict, list)):
+              value = json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+          print(f"{key}={value}")
+      PY
+
+      echo "[env] .env rendered successfully"
+      echo "[env] Env keys loaded:"
+      grep -v '^#' /workspace/.env | grep -v '^$' | cut -d'=' -f1
+
+  # ---------------------------------------------
+  # 2. Build Docker image with layer cache
+  # ---------------------------------------------
+  - name: gcr.io/cloud-builders/docker
+    id: Build
+    waitFor: ['Pull-cache']
+    env:
+      - DOCKER_BUILDKIT=1
+    args:
+      - build
+      - --build-arg=BUILDKIT_INLINE_CACHE=1
+      - --cache-from
+      - $_AR_HOSTNAME/$_AR_PROJECT_ID/$_AR_REPOSITORY/$REPO_NAME/$_SERVICE_NAME:latest
+      - -t
+      - >-
+        $_AR_HOSTNAME/$_AR_PROJECT_ID/$_AR_REPOSITORY/$REPO_NAME/$_SERVICE_NAME:$COMMIT_SHA
+      - -t
+      - >-
+        $_AR_HOSTNAME/$_AR_PROJECT_ID/$_AR_REPOSITORY/$REPO_NAME/$_SERVICE_NAME:latest
+      - -f
+      - Dockerfile
+      - .
+
+  # ---------------------------------------------
+  # 3. Push image to Artifact Registry
+  # ---------------------------------------------
+  - name: gcr.io/cloud-builders/docker
+    id: Push
+    waitFor: ['Build']
+    args:
+      - push
+      - --all-tags
+      - >-
+        $_AR_HOSTNAME/$_AR_PROJECT_ID/$_AR_REPOSITORY/$REPO_NAME/$_SERVICE_NAME
+
+  # ---------------------------------------------
+  # 4. Deploy to VPS via SSH
+  # ---------------------------------------------
+  - name: alpine
+    id: Deploy-to-VPS
+    waitFor: ['Push', 'Render-env']
+    entrypoint: sh
+    secretEnv: ['VM_SSH_KEY', 'SA_BK_DEV', 'VM_SSH_PORT']
+    args:
+      - -c
+      - |
+        set -e
+
+        echo "[deploy] Installing SSH client..."
+        apk add --no-cache openssh-client
+
+        echo "[deploy] Setting up SSH key..."
+        mkdir -p /workspace/.ssh
+        printf '%s\n' "$$VM_SSH_KEY" | tr -d '\r' > /workspace/.ssh/id_rsa
+        chmod 600 /workspace/.ssh/id_rsa
+
+        CONTROL_PATH="/workspace/.ssh/ctl-%r@%h:%p"
+        SSH_OPTS="-i /workspace/.ssh/id_rsa -o Port=$$VM_SSH_PORT -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ControlMaster=auto -o ControlPath=$$CONTROL_PATH -o ControlPersist=600"
+        SSH_CMD="ssh $$SSH_OPTS $_VPS_USER@$_VPS_IP"
+        SCP_CMD="scp -o ConnectTimeout=10 $$SSH_OPTS"
+
+        echo "[deploy] Opening persistent SSH master connection..."
+        ssh -i /workspace/.ssh/id_rsa \
+            -o Port="$$VM_SSH_PORT" \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -o ControlMaster=yes \
+            -o ControlPath="$$CONTROL_PATH" \
+            -o ControlPersist=600 \
+            -Nf $_VPS_USER@$_VPS_IP
+
+        sleep 1
+
+        echo "[deploy] Preparing deployment on VPS..."
+        $$SSH_CMD 'set -e && \
+          sudo mkdir -p /opt/$_SERVICE_NAME && \
+          sudo chown -R $_VPS_USER:$_VPS_USER /opt/$_SERVICE_NAME && \
+          mkdir -p /tmp/$_SERVICE_NAME'
+
+        echo "[deploy] Copying .env and service account..."
+        $$SCP_CMD /workspace/.env $_VPS_USER@$_VPS_IP:/tmp/$_SERVICE_NAME/ 2>/tmp/env_err.log &
+        ENV_PID=$!
+
+        printf '%s\n' "$$SA_BK_DEV" > /workspace/sa.json
+        $$SCP_CMD /workspace/sa.json $_VPS_USER@$_VPS_IP:/tmp/$_SERVICE_NAME/ 2>/tmp/sa_err.log &
+        SA_PID=$!
+
+        if ! wait $$ENV_PID; then
+          echo "[deploy] Failed to copy .env file"
+          cat /tmp/env_err.log
+          exit 1
+        fi
+
+        if ! wait $$SA_PID; then
+          echo "[deploy] Failed to copy sa.json file"
+          cat /tmp/sa_err.log
+          exit 1
+        fi
+
+        echo "[deploy] Moving files to /opt..."
+        $$SSH_CMD 'sudo mv /tmp/$_SERVICE_NAME/.env /opt/$_SERVICE_NAME/.env && \
+          sudo mv /tmp/$_SERVICE_NAME/sa.json /opt/$_SERVICE_NAME/sa.json && \
+          sudo chmod 600 /opt/$_SERVICE_NAME/.env && \
+          sudo chmod 600 /opt/$_SERVICE_NAME/sa.json'
+
+        echo "[deploy] Generating deployment script..."
+        cat << 'DEPLOY_SCRIPT' > /workspace/deploy.sh
+        set -e
+
+        IMAGE=$_AR_HOSTNAME/$_AR_PROJECT_ID/$_AR_REPOSITORY/$REPO_NAME/$_SERVICE_NAME:$COMMIT_SHA
+        CLEANUP_PATTERN=$_AR_HOSTNAME/$_AR_PROJECT_ID/$_AR_REPOSITORY/$REPO_NAME/$_SERVICE_NAME
+
+        cat /opt/$_SERVICE_NAME/sa.json | sudo docker login -u _json_key --password-stdin https://$_AR_HOSTNAME
+
+        echo "[deploy] Stopping existing container before cleanup..."
+        sudo docker stop $_SERVICE_NAME 2>/dev/null || true
+        sudo docker rm -f $_SERVICE_NAME 2>/dev/null || true
+
+        echo "[deploy] Removing old local images for this service..."
+        ALL_SERVICE_IMAGES=$$(sudo docker images "$${CLEANUP_PATTERN}" -q 2>/dev/null | sort -u)
+        if [ -n "$$ALL_SERVICE_IMAGES" ]; then
+          echo "$$ALL_SERVICE_IMAGES" | xargs -r sudo docker rmi -f 2>/dev/null || true
+        fi
+
+        echo "[deploy] Removing build cache and dangling layers..."
+        sudo docker builder prune -af 2>/dev/null || true
+        sudo docker image prune -f 2>/dev/null || true
+
+        echo "[deploy] Removing orphaned containerd snapshots from failed pulls..."
+        sudo ctr -n moby snapshots ls 2>/dev/null | \
+          awk 'NR>1 && /Preparing/ {print $1}' | \
+          xargs -r -I{} sudo ctr -n moby snapshots rm "{}" 2>/dev/null || true
+
+        echo "[deploy] Pulling new image..."
+        sudo docker pull "$$IMAGE"
+
+        echo "[deploy] Starting new container..."
+        sudo docker run -d \
+          --name $_SERVICE_NAME \
+          --restart=always \
+          --network uct_internal_net \
+          --env-file /opt/$_SERVICE_NAME/.env \
+          -p $_HOST_PORT:$_PORT \
+          "$$IMAGE"
+
+        sleep 3
+
+        if ! sudo docker ps --filter "name=$_SERVICE_NAME" --filter "status=running" | grep -q $_SERVICE_NAME; then
+          echo "[deploy] Container failed to start"
+          sudo docker logs $_SERVICE_NAME | tail -80
+          exit 1
+        fi
+
+        echo "[deploy] Container $_SERVICE_NAME is running successfully!"
+        DEPLOY_SCRIPT
+
+        echo "[deploy] Copying deploy script to VPS..."
+        $$SCP_CMD /workspace/deploy.sh $_VPS_USER@$_VPS_IP:/tmp/$_SERVICE_NAME/deploy.sh
+
+        echo "[deploy] Executing deployment script on VPS..."
+        $$SSH_CMD 'bash /tmp/$_SERVICE_NAME/deploy.sh'
+
+        echo "[deploy] Cleaning up..."
+        $$SSH_CMD 'rm -rf /tmp/$_SERVICE_NAME' || true
+        shred -u /workspace/sa.json /workspace/.ssh/id_rsa 2>/dev/null || rm -f /workspace/sa.json /workspace/.ssh/id_rsa
+
+        echo "[deploy] Deployment finished!"
+
+images:
+  - >-
+    $_AR_HOSTNAME/$_AR_PROJECT_ID/$_AR_REPOSITORY/$REPO_NAME/$_SERVICE_NAME:$COMMIT_SHA
+  - >-
+    $_AR_HOSTNAME/$_AR_PROJECT_ID/$_AR_REPOSITORY/$REPO_NAME/$_SERVICE_NAME:latest
+
+availableSecrets:
+  secretManager:
+    - versionName: projects/$PROJECT_ID/secrets/dev-vm-ssh-key/versions/latest
+      env: VM_SSH_KEY
+    - versionName: projects/$PROJECT_ID/secrets/SA_BK_DEV/versions/latest
+      env: SA_BK_DEV
+    - versionName: projects/$PROJECT_ID/secrets/ssh-port-dev/versions/latest
+      env: VM_SSH_PORT
+
+options:
+  substitutionOption: ALLOW_LOOSE
+  logging: CLOUD_LOGGING_ONLY
+
+substitutions:
+  # ===== SERVICE =====
+  _SERVICE_NAME: uc-smile-api
+
+  # ===== VPS =====
+  _VPS_IP: '14.225.210.119'
+  _VPS_USER: alphaforce
+  _HOST_PORT: '3006'
+
+  # ===== ARTIFACT REGISTRY =====
+  _AR_HOSTNAME: asia-southeast1-docker.pkg.dev
+  _AR_PROJECT_ID: uctalent-dev
+  _AR_REPOSITORY: cloud-run-source-deploy
+
+  # ===== APPLICATION =====
+  _NODE_ENV: production
+  _PORT: '3001'
+  _ALLOWED_ORIGIN: https://ucsmile.com
+  _AUTO_RUN_MIGRATIONS: 'true'
+
+  # ===== GOOGLE SHEET =====
+  _GOOGLE_SHEET_ID: 1AzurV8LSEbIleaFQ4Rzd9WXAtthF8cgC_tWw9fl3Lvw
+  _GOOGLE_SHEET_GID: '1339217413'
+
+  # ===== SECRET JSON =====
+  # Expected JSON keys: DATABASE_URL, GEMINI_API_KEY, ADMIN_SECRET_KEY
+  _SECRET_JSON_NAME: uc-smile-api-env-dev
+
+tags:
+  - deploy-to-vps
+  - uc-smile-api
