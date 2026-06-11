@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import type { Message, RagChunkWithScore } from "../../db/types";
-import { buildChatPrompt } from "./prompt-builder";
+import type { SubQuestion } from "../../intent/types";
+import { buildChatPrompt, buildGeneralPrompt, buildMixedPrompt } from "./prompt-builder";
 
 function makeChunk(question: string, content: string, category = "General"): RagChunkWithScore {
   return {
@@ -32,7 +33,7 @@ describe("buildChatPrompt", () => {
     const chunk = makeChunk("What is the price?", "It costs $500", "Pricing");
     const result = buildChatPrompt("price?", [chunk], []);
     const text = result[0].parts[0].text;
-    expect(text).toContain("FAQ CONTEXT");
+    expect(text).toContain("SOURCE MATERIAL");
     expect(text).toContain("What is the price?");
     expect(text).toContain("It costs $500");
     expect(text).toContain("Pricing");
@@ -86,5 +87,109 @@ describe("buildChatPrompt", () => {
     const text = result[0].parts[0].text;
     expect(text).toContain("[1]");
     expect(text).toContain("[2]");
+  });
+
+  it("injects the requested response language into RAG prompts", () => {
+    const result = buildChatPrompt("gia bao nhieu?", [], [], "vi");
+    expect(result[0].parts[0].text).toContain("Respond in Vietnamese.");
+  });
+
+  it("includes implementation leakage guardrails in the RAG prompt", () => {
+    const result = buildChatPrompt("price?", [], []);
+    expect(result[0].parts[0].text).toContain('NEVER mention "FAQ"');
+  });
+});
+
+describe("buildGeneralPrompt", () => {
+  it("returns one user message when history is empty", () => {
+    const result = buildGeneralPrompt("What is a root canal?", [], "en");
+    expect(result).toHaveLength(1);
+    expect(result[0].parts[0].text).toContain("What is a root canal?");
+  });
+
+  it("includes the response language instruction", () => {
+    const result = buildGeneralPrompt("Tẩy trắng răng là gì?", [], "vi");
+    expect(result[0].parts[0].text).toContain("Respond in Vietnamese.");
+  });
+
+  it("keeps the support recommendation rule in the prompt", () => {
+    const result = buildGeneralPrompt("What is a crown?", [], "en");
+    expect(result[0].parts[0].text).toContain("Always end by recommending the user contact UC Smile support");
+  });
+});
+
+describe("buildMixedPrompt", () => {
+  it("includes the original message and decomposed sub-questions", () => {
+    const subQuestions: SubQuestion[] = [
+      {
+        text: "What is an implant?",
+        intent: "GENERAL_SAFE",
+        searchQuery: "Implant nha khoa là gì?",
+      },
+      {
+        text: "How much does it cost?",
+        intent: "FAQ",
+        searchQuery: "Giá implant là bao nhiêu?",
+      },
+    ];
+
+    const result = buildMixedPrompt(
+      "What is an implant, and how much does it cost?",
+      subQuestions,
+      [],
+      [],
+      "en",
+    );
+
+    const text = result[0].parts[0].text;
+    expect(text).toContain("Original user message");
+    expect(text).toContain("What is an implant?");
+    expect(text).toContain("intent=FAQ");
+    expect(text).toContain("intent=GENERAL_SAFE");
+  });
+
+  it("includes FAQ source material and response language", () => {
+    const subQuestions: SubQuestion[] = [
+      {
+        text: "How much does it cost?",
+        intent: "FAQ",
+        searchQuery: "Giá implant là bao nhiêu?",
+      },
+    ];
+
+    const result = buildMixedPrompt(
+      "How much does it cost?",
+      subQuestions,
+      [makeChunk("How much does implant cost?", "Implant starts from $500", "Pricing")],
+      [],
+      "vi",
+    );
+
+    const text = result[0].parts[0].text;
+    expect(text).toContain("Respond in Vietnamese.");
+    expect(text).toContain("SOURCE MATERIAL");
+    expect(text).toContain("Implant starts from $500");
+  });
+
+  it("includes guardrails for risky and off-topic parts", () => {
+    const subQuestions: SubQuestion[] = [
+      {
+        text: "Should I take antibiotics?",
+        intent: "RISKY",
+        searchQuery: "Có nên uống kháng sinh không?",
+      },
+    ];
+
+    const result = buildMixedPrompt(
+      "Should I take antibiotics?",
+      subQuestions,
+      [],
+      [],
+      "en",
+    );
+
+    const text = result[0].parts[0].text;
+    expect(text).toContain("For RISKY questions");
+    expect(text).toContain('NEVER mention "FAQ"');
   });
 });

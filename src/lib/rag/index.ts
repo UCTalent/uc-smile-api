@@ -1,2 +1,2 @@
 export { runIngestionPipeline } from "./ingestion/index";
-export { ragQuery } from "./pipeline";
+export { generalSafeQuery, mixedIntentQuery, ragQuery, retrieveChunksForQuery } from "./pipeline";
